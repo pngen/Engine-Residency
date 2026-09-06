@@ -89,6 +89,14 @@ void run_session(SessionShared& shared, net::TcpSocket sock) {
     ProtocolMessage msg;
     if (!sock.recv_frame(msg)) break;
     auto f = parse_payload(msg.payload);
+    // Reject old-epoch traffic: after a coordinator restart (epoch advanced) any
+    // message carrying a stale epoch is refused without touching live state.
+    if (msg.epoch != 0 && msg.epoch != shared.runtime.current_epoch().raw()) {
+      ProtocolMessage ack; ack.type = MessageType::ERROR;
+      ack.payload = make_payload({{"code",std::to_string((int)ErrorCode::StaleEpoch)},{"msg","stale epoch traffic"}});
+      sock.send_frame(ack);
+      continue;
+    }
     switch (msg.type) {
       case MessageType::HELLO: {
         ProtocolMessage ack; ack.type = MessageType::REGISTER_ACK;
@@ -115,7 +123,7 @@ void run_session(SessionShared& shared, net::TcpSocket sock) {
           inc_id = registered.incarnation_id;
           { std::lock_guard<std::mutex> lk(shared.mtx); shared.session_inc[sid] = inc_id; shared.session_owner[sid] = get(f,"label","worker"); }
           ProtocolMessage ack; ack.type = MessageType::REGISTER_ACK;
-          ack.payload = make_payload({{"ok","true"},{"incarnation_id",std::to_string(registered.incarnation_id.raw())},{"incarnation_generation",std::to_string(registered.incarnation_generation.raw())},{"epoch",std::to_string(shared.runtime.current_epoch().raw())},{"authority",std::to_string(shared.runtime.current_authority().raw())}});
+          ack.payload = make_payload({{"ok","true"},{"incarnation_id",std::to_string(registered.incarnation_id.raw())},{"incarnation_generation",std::to_string(registered.incarnation_generation.raw())},{"readiness_gen",std::to_string(registered.readiness_generation.raw())},{"epoch",std::to_string(shared.runtime.current_epoch().raw())},{"authority",std::to_string(shared.runtime.current_authority().raw())}});
           sock.send_frame(ack);
         } catch (const DomainError& e) {
           ProtocolMessage ack; ack.type = MessageType::ERROR; ack.payload = make_payload({{"code",std::to_string((int)e.code())},{"msg",e.what()}}); sock.send_frame(ack);
@@ -124,8 +132,11 @@ void run_session(SessionShared& shared, net::TcpSocket sock) {
       }
       case MessageType::PUBLISH_COMPONENT: {
         try {
+          EngineIncarnationId target = shared.session_inc[sid];
+          if (u(f,"incarnation_id",0) != 0) target = EngineIncarnationId(u(f,"incarnation_id",0));
+          if (shared.runtime.incarnation_is_fenced(target)) throw_error(ErrorCode::FencedWorker, "fenced incarnation");
           ComponentEvidence ev;
-          ev.incarnation_id = shared.session_inc[sid];
+          ev.incarnation_id = target;
           ev.engine_id = EngineId(1); ev.engine_generation = EngineGeneration(1);
           ev.category = (ComponentCategory)(int)u(f,"category",0);
           ev.state = (ComponentState)(int)u(f,"state",0);
@@ -162,20 +173,27 @@ void run_session(SessionShared& shared, net::TcpSocket sock) {
       }
       case MessageType::QUERY_READINESS: {
         try {
-          ReadinessResult rr = shared.runtime.evaluate_readiness(inc_id, ReadinessProfileId(1));
+          EngineIncarnationId target = inc_id;
+          if (u(f,"incarnation_id",0) != 0) target = EngineIncarnationId(u(f,"incarnation_id",0));
+          if (shared.runtime.incarnation_is_fenced(target)) throw_error(ErrorCode::FencedWorker, "fenced incarnation");
+          ReadinessResult rr = shared.runtime.evaluate_readiness(target, ReadinessProfileId(1));
           ProtocolMessage ack; ack.type = MessageType::PREPARE_RESULT;
-          ack.payload = make_payload({{"outcome",std::string(to_string(rr.outcome))}});
+          std::string miss=[&]{std::string x; for (const auto& m : rr.missing){if(!x.empty())x+=",";x+=m;} for (const auto& i : rr.incompatible){if(!x.empty())x+=",";x+=i;} return x;}(); ack.payload = make_payload({{"outcome",std::string(to_string(rr.outcome))},{"missing",miss}});
           sock.send_frame(ack);
         } catch (const DomainError& e) { ProtocolMessage ack; ack.type = MessageType::ERROR; ack.payload = make_payload({{"code",std::to_string((int)e.code())},{"msg",e.what()}}); sock.send_frame(ack); }
         break;
       }
       case MessageType::ACTIVATE: {
         try {
+          EngineIncarnationId target = inc_id;
+          if (u(f,"incarnation_id",0) != 0) target = EngineIncarnationId(u(f,"incarnation_id",0));
+          if (shared.runtime.incarnation_is_fenced(target)) throw_error(ErrorCode::FencedWorker, "fenced incarnation");
           ActivationRequest req;
-          req.incarnation_id = inc_id; req.incarnation_generation = EngineIncarnationGeneration(1);
+          req.incarnation_id = target; req.incarnation_generation = EngineIncarnationGeneration(1);
           req.engine_id = EngineId(1); req.engine_generation = EngineGeneration(1);
           req.profile_id = ReadinessProfileId(1); req.profile_generation = ReadinessProfileGeneration(1);
-          req.readiness_generation = ReadinessGeneration((std::uint64_t)u(f,"readiness_gen",1));
+          std::uint64_t rgen = u(f,"readiness_gen",0);
+          req.readiness_generation = (rgen != 0) ? ReadinessGeneration(rgen) : shared.runtime.current_readiness_generation(target);
           req.standby_generation = StandbyGeneration(1);
           req.caller_authority = shared.runtime.current_authority();
           req.slot_id = EngineSlotId((std::uint64_t)u(f,"slot_id",1));
@@ -207,9 +225,12 @@ void run_session(SessionShared& shared, net::TcpSocket sock) {
       }
       case MessageType::RELEASE_USE: {
         try {
+          EngineIncarnationId target = inc_id;
+          if (u(f,"incarnation_id",0) != 0) target = EngineIncarnationId(u(f,"incarnation_id",0));
+          if (shared.runtime.incarnation_is_fenced(target)) throw_error(ErrorCode::FencedWorker, "fenced incarnation");
           ServingUseToken tok;
           tok.use_id = ServingUseId((std::uint64_t)u(f,"use_id",0));
-          tok.incarnation_id = inc_id; tok.incarnation_generation = EngineIncarnationGeneration(1);
+          tok.incarnation_id = target; tok.incarnation_generation = EngineIncarnationGeneration(1);
           shared.runtime.release_serving_use(tok, WorkOutcome::COMPLETED, get(f,"detail","released"));
           ProtocolMessage ack; ack.type = MessageType::REGISTER_ACK; ack.payload = make_payload({{"ok","true"}}); sock.send_frame(ack);
         } catch (const DomainError& e) { ProtocolMessage ack; ack.type = MessageType::ERROR; ack.payload = make_payload({{"code",std::to_string((int)e.code())},{"msg",e.what()}}); sock.send_frame(ack); }
@@ -230,6 +251,15 @@ void run_session(SessionShared& shared, net::TcpSocket sock) {
         std::string path = get(f,"path","er-state.bin");
         try { std::string blob = shared.runtime.serialize(); FILE* fp = fopen(path.c_str(),"wb"); if (fp) { fwrite(blob.data(),1,blob.size(),fp); fclose(fp); } ProtocolMessage ack; ack.type = MessageType::REGISTER_ACK; ack.payload = make_payload({{"ok","true"},{"bytes",std::to_string(blob.size())}}); sock.send_frame(ack); }
         catch (const DomainError& e) { ProtocolMessage ack; ack.type = MessageType::ERROR; ack.payload = make_payload({{"code",std::to_string((int)e.code())},{"msg",e.what()}}); sock.send_frame(ack); }
+        break;
+      }
+      case MessageType::EXECUTION_RESULT: {
+        try {
+          EngineIncarnationId target = inc_id;
+          if (u(f,"incarnation_id",0) != 0) target = EngineIncarnationId(u(f,"incarnation_id",0));
+          if (shared.runtime.incarnation_is_fenced(target)) throw_error(ErrorCode::FencedWorker, "fenced incarnation");
+          ProtocolMessage ack; ack.type = MessageType::REGISTER_ACK; ack.payload = make_payload({{"ok","true"}}); sock.send_frame(ack);
+        } catch (const DomainError& e) { ProtocolMessage ack; ack.type = MessageType::ERROR; ack.payload = make_payload({{"code",std::to_string((int)e.code())},{"msg",e.what()}}); sock.send_frame(ack); }
         break;
       }
       case MessageType::SHUTDOWN: {

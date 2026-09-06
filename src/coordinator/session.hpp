@@ -27,7 +27,7 @@ void run_session(SessionShared& shared, net::TcpSocket sock);
 ReadinessProfileId seed_reference_engine(EngineResidency& rt, EngineDefinition& out_def);
 
 // Runs the reference coordinator accept loop; returns the bound port.
-int run_coordinator(std::uint16_t port);
+int run_coordinator(std::uint16_t port, const std::string& state_path = "");
 
 }  // namespace engine_residency
 

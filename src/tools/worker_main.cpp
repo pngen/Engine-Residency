@@ -28,7 +28,7 @@ static bool recv_msg(net::TcpSocket& s, uint64_t& epoch, ProtocolMessage& out){ 
 int main(int argc, char** argv) {
   std::string host="127.0.0.1"; std::uint16_t port=27200;
   std::uint64_t worker_id=1, boot=1; std::string label="worker"; std::uint32_t pid=0;
-  bool use_cuda=false; int serve=0; std::string result_file; bool stay_alive=false;
+  bool use_cuda=false; int serve=0; std::string result_file; bool stay_alive=false; std::uint64_t slot=1;
   for (int i=1;i<argc;++i){ std::string a=argv[i];
     if(a=="--host") host=argv[++i];
     else if(a=="--port") port=(std::uint16_t)std::atoi(argv[++i]);
@@ -40,6 +40,7 @@ int main(int argc, char** argv) {
     else if(a=="--serve") serve=std::atoi(argv[++i]);
     else if(a=="--result") result_file=argv[++i];
     else if(a=="--stay-alive") stay_alive=true;
+    else if(a=="--slot") slot=std::stoull(argv[++i]);
   }
   if(!net::init()) return 1;
   net::TcpSocket sock;
@@ -92,7 +93,18 @@ int main(int argc, char** argv) {
   send_msg(sock,MessageType::QUERY_READINESS,epoch,auth,{});
   recv_msg(sock,epoch,mr);
   std::string outcome = get(parse_payload(mr.payload),"outcome","UNKNOWN");
+  std::string qp = mr.payload;
   std::printf("worker %llu readiness=%s\n",(unsigned long long)worker_id,outcome.c_str());
+
+  // Authorize local activation (the worker requests its incarnation's activation
+  // through the coordinator authority). This proves real activation over TCP.
+  std::string activation = "UNKNOWN";
+  if (outcome == "READY" || outcome == "DEGRADED") {
+    send_msg(sock,MessageType::ACTIVATE,epoch,auth,{{"readiness_gen","0"},{"slot_id",std::to_string(slot)},{"caller","worker"}});
+    recv_msg(sock,epoch,mr);
+    activation = get(parse_payload(mr.payload),"state","REJECTED");
+    std::printf("worker %llu activation=%s\n",(unsigned long long)worker_id,activation.c_str());
+  }
 
   // Serve: acquire use, execute real compute, verify parity, release.
   int served=0;
@@ -117,7 +129,7 @@ int main(int argc, char** argv) {
   // to observe readiness + parity across real CUDA worker processes).
   if (!result_file.empty()) {
     FILE* fp = fopen(result_file.c_str(), "wb");
-    if (fp) { fprintf(fp, "worker=%llu readiness=%s parity=%s\n", (unsigned long long)worker_id, outcome.c_str(), served > 0 ? "OK" : "NA"); fclose(fp); }
+    if (fp) { fprintf(fp, "worker=%llu incarnation=%llu readiness=%s activation=%s parity=%s detail=|%s|\n", (unsigned long long)worker_id, (unsigned long long)inc_id, outcome.c_str(), activation.c_str(), served > 0 ? "OK" : "NA", qp.c_str()); fclose(fp); }
   }
 
   if (stay_alive) {

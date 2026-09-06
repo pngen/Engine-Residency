@@ -157,6 +157,8 @@ class EngineResidency {
   int active_use_count() const;
   CoordinatorEpoch current_epoch() const;
   AuthorityGeneration current_authority() const;
+  ReadinessGeneration current_readiness_generation(EngineIncarnationId incarnation_id) const;
+  bool incarnation_is_fenced(EngineIncarnationId incarnation_id) const;
 
  private:
   std::unique_ptr<EngineResidencyImpl> impl_;

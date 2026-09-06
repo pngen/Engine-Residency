@@ -223,6 +223,9 @@ CoordinatorEpoch EngineResidency::advance_epoch() {
       kv.second.is_current = false;
     }
   }
+  // Epoch advance resets serving authority: previously-assigned standby slots are
+  // released so revalidated incarnations can be re-authorized under the new epoch.
+  impl_->slots.clear();
   return impl_->authority.epoch;
 }
 // ---- Component evidence ----------------------------------------------------
@@ -456,8 +459,16 @@ ActivationRecord EngineResidency::activate(const ActivationRequest& req) {
   if (req.slot_id.is_valid()) {
     auto sit = impl_->slots.find(req.slot_id);
     if (sit != impl_->slots.end()) {
-      if (sit->second.assigned_incarnation.is_valid() && sit->second.assigned_incarnation != inc->incarnation_id)
-        throw_error(ErrorCode::ActivationConflict, "exclusive slot already assigned");
+      if (sit->second.assigned_incarnation.is_valid() && sit->second.assigned_incarnation != inc->incarnation_id) {
+        // A fenced/dead holder must not block takeover by standby/replacement.
+        const EngineIncarnation* holder = impl_->find_incc(sit->second.assigned_incarnation);
+        bool holder_dead = (holder == nullptr) || holder->state.health == HealthState::FENCED ||
+                           holder->state.health == HealthState::LOST ||
+                           holder->state.lifecycle == ProcessLifecycle::LOST ||
+                           holder->state.lifecycle == ProcessLifecycle::RETIRED ||
+                           holder->state.lifecycle == ProcessLifecycle::FAILED;
+        if (!holder_dead) throw_error(ErrorCode::ActivationConflict, "exclusive slot already assigned");
+      }
       sit->second.assigned_incarnation = inc->incarnation_id;
     } else {
       StandbySlot s; s.slot_id = req.slot_id; s.pool_id = EnginePoolId(1); s.name = "default";
@@ -713,6 +724,11 @@ void EngineResidency::load(const std::string& blob) {
   for (auto& p : s.replacements) impl_->replacement_plans[p.replacement_id] = p;
   impl_->cost_history = std::move(s.cost_history);
   impl_->current_by_engine.clear();
+  // Resume id counters above the recovered range so a fresh registration after
+  // recovery can never collide with a restored identity.
+  impl_->id_inc = 1000000; impl_->id_evid = 1000000; impl_->id_use = 1000000;
+  impl_->id_attempt = 1000000; impl_->id_plan = 1000000; impl_->id_activation = 1000000;
+  impl_->id_slot = 1000000; impl_->id_repl = 1000000; impl_->id_permit = 1000000;
 }
 
 // ---- Inspection -----------------------------------------------------------
@@ -750,6 +766,21 @@ CoordinatorEpoch EngineResidency::current_epoch() const {
 AuthorityGeneration EngineResidency::current_authority() const {
   std::shared_lock lk(impl_->mtx);
   return impl_->authority.authority;
+}
+
+ReadinessGeneration EngineResidency::current_readiness_generation(EngineIncarnationId inc_id) const {
+  std::shared_lock lk(impl_->mtx);
+  const EngineIncarnation* inc = impl_->find_incc(inc_id);
+  if (inc == nullptr) throw_error(ErrorCode::UnknownIncarnation, "unknown incarnation");
+  return inc->readiness_generation;
+}
+
+bool EngineResidency::incarnation_is_fenced(EngineIncarnationId inc_id) const {
+  std::shared_lock lk(impl_->mtx);
+  const EngineIncarnation* inc = impl_->find_incc(inc_id);
+  if (inc == nullptr) return true;
+  return inc->state.health == HealthState::FENCED || inc->state.registration == RegistrationState::FENCED ||
+         inc->state.lifecycle == ProcessLifecycle::LOST || inc->state.lifecycle == ProcessLifecycle::RETIRED;
 }
 
 }  // namespace engine_residency
