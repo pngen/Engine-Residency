@@ -67,6 +67,11 @@ class EngineResidency {
   // matches the worker/boot. Returns the incarnation with assigned identity and
   // generation. A replayed REGISTER under a fenced boot is rejected.
   EngineIncarnation register_incarnation(EngineIncarnation inc, RegistrationPermit permit);
+  // Transitions an incarnation to RUNNING (worker confirmed process start).
+  void mark_running(EngineIncarnationId incarnation_id);
+  // After a coordinator restart, re-authorizes a survivor that has re-verified its
+  // current physical bindings under the current epoch.
+  void revalidate(EngineIncarnationId incarnation_id);
   // Marks an incarnation (and all worker boots) fenced. Old traffic remains
   // rejected.
   void fence_worker(WorkerId worker_id, WorkerBootId worker_boot, const std::string& reason);

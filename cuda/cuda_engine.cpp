@@ -59,6 +59,7 @@ class CudaReferenceBackend final : public ReferenceBackend {
     if (cudaMalloc((void**)&d_model_, model_bytes_) != cudaSuccess) return false;
     if (workspace_bytes_ && cudaMalloc((void**)&d_workspace_, workspace_bytes_) != cudaSuccess) return false;
     if (cudaMalloc((void**)&d_kv_, kv_entries_ * sizeof(float)) != cudaSuccess) return false;
+    if (cudaMalloc((void**)&d_seed_, sizeof(unsigned int)) != cudaSuccess) return false;
     if (cudaMallocHost((void**)&h_staging_, staging_bytes()) != cudaSuccess) return false;
     prepared_ = true;
     return true;
@@ -75,10 +76,12 @@ class CudaReferenceBackend final : public ReferenceBackend {
     destroy_graph();
     cudaStream_t s = nullptr;
     cudaStreamCreate(&s);
+    unsigned int seedv = 42;
+    cudaMemcpy(d_seed_, &seedv, sizeof(seedv), cudaMemcpyHostToDevice);
     cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal);
     int n = (int)staging_floats();
     int threads = 256; int blocks = (n + threads - 1) / threads;
-    er_launch_reference_kernel(d_model_, d_workspace_, n, 42, blocks, threads, s);
+    er_launch_reference_kernel(d_model_, d_workspace_, n, d_seed_, blocks, threads, s);
     cudaStreamEndCapture(s, &graph_);
     cudaStreamDestroy(s);
     if (cudaGraphInstantiate(&graph_exec_, graph_, nullptr, nullptr, 0) != cudaSuccess) return false;
@@ -125,17 +128,21 @@ class CudaReferenceBackend final : public ReferenceBackend {
     if (cudaMemcpy(d_model_, h_staging_, n * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
       res.ok = false; res.detail = "H2D failed"; return res;
     }
+    unsigned int seedv = (unsigned)in.seed;
+    if (cudaMemcpy(d_seed_, &seedv, sizeof(seedv), cudaMemcpyHostToDevice) != cudaSuccess) {
+      res.ok = false; res.detail = "seed H2D failed"; return res;
+    }
     int threads = 256; int blocks = (int)((n + threads - 1) / threads);
     if (graph_ready_ && graph_exec_) {
       if (cudaGraphLaunch(graph_exec_, 0) != cudaSuccess) { res.ok = false; res.detail = "graph replay failed"; return res; }
     } else {
-      if (er_launch_reference_kernel(d_model_, d_workspace_, (int)n, (unsigned)in.seed, blocks, threads, 0) != cudaSuccess) {
+      if (er_launch_reference_kernel(d_model_, d_workspace_, (int)n, d_seed_, blocks, threads, 0) != cudaSuccess) {
         res.ok = false; res.detail = "kernel launch failed"; return res;
       }
     }
     if (cudaDeviceSynchronize() != cudaSuccess) { res.ok = false; res.detail = "sync failed"; return res; }
     std::uint64_t t0 = std::chrono::steady_clock::now().time_since_epoch().count();
-    if (cudaMemcpy(h_staging_, d_model_, n * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    if (cudaMemcpy(h_staging_, d_workspace_, n * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
       res.ok = false; res.detail = "D2H failed"; return res;
     }
     std::uint64_t t1 = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -152,6 +159,7 @@ class CudaReferenceBackend final : public ReferenceBackend {
   void release_alloc() {
     destroy_graph();
     if (h_staging_) { cudaFreeHost(h_staging_); h_staging_ = nullptr; }
+    if (d_seed_) { cudaFree(d_seed_); d_seed_ = nullptr; }
     if (d_model_) { cudaFree(d_model_); d_model_ = nullptr; }
     if (d_workspace_) { cudaFree(d_workspace_); d_workspace_ = nullptr; }
     if (d_kv_) { cudaFree(d_kv_); d_kv_ = nullptr; }
@@ -166,6 +174,7 @@ class CudaReferenceBackend final : public ReferenceBackend {
   float* d_model_{nullptr};
   float* d_workspace_{nullptr};
   float* d_kv_{nullptr};
+  unsigned int* d_seed_{nullptr};
   float* h_staging_{nullptr};
   cudaGraph_t graph_{nullptr};
   cudaGraphExec_t graph_exec_{nullptr};

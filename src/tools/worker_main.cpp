@@ -4,9 +4,11 @@
 #include "engine_residency/components.hpp"
 #include "engine_residency/engine.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace engine_residency;
@@ -26,7 +28,7 @@ static bool recv_msg(net::TcpSocket& s, uint64_t& epoch, ProtocolMessage& out){ 
 int main(int argc, char** argv) {
   std::string host="127.0.0.1"; std::uint16_t port=27200;
   std::uint64_t worker_id=1, boot=1; std::string label="worker"; std::uint32_t pid=0;
-  bool use_cuda=false; int serve=0;
+  bool use_cuda=false; int serve=0; std::string result_file; bool stay_alive=false;
   for (int i=1;i<argc;++i){ std::string a=argv[i];
     if(a=="--host") host=argv[++i];
     else if(a=="--port") port=(std::uint16_t)std::atoi(argv[++i]);
@@ -36,6 +38,8 @@ int main(int argc, char** argv) {
     else if(a=="--pid") pid=(std::uint32_t)std::atoi(argv[++i]);
     else if(a=="--cuda") use_cuda=true;
     else if(a=="--serve") serve=std::atoi(argv[++i]);
+    else if(a=="--result") result_file=argv[++i];
+    else if(a=="--stay-alive") stay_alive=true;
   }
   if(!net::init()) return 1;
   net::TcpSocket sock;
@@ -109,7 +113,21 @@ int main(int argc, char** argv) {
     ++served;
   }
 
-  // Keep alive briefly, then exit.
+  // Write a machine-readable result file when requested (used by the proof tests
+  // to observe readiness + parity across real CUDA worker processes).
+  if (!result_file.empty()) {
+    FILE* fp = fopen(result_file.c_str(), "wb");
+    if (fp) { fprintf(fp, "worker=%llu readiness=%s parity=%s\n", (unsigned long long)worker_id, outcome.c_str(), served > 0 ? "OK" : "NA"); fclose(fp); }
+  }
+
+  if (stay_alive) {
+    // Hold the device allocations and graph until a real OS termination. This
+    // is the worker process holding genuine CUDA state that a caller kills.
+    std::printf("worker %llu staying alive holding CUDA state\n", (unsigned long long)worker_id);
+    fflush(stdout);
+    while (true) { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
+  }
+
   backend->release();
   net::shutdown();
   return 0;

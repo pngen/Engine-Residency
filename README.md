@@ -121,7 +121,8 @@ MEASURED, REPORTED, DERIVED, ESTIMATED, SYNTHETIC, RECONSTRUCTED, UNKNOWN, and U
 
 ## Actual limitations
 
-- The CUDA reference engine and kernel are implemented and the kernel compiles with nvcc for sm_120, but the full CMake CUDA object build on this host (CMake 4.3 + MSVC 19.44 + CUDA 12.9 nvcc) fails at the kernel object step with "A single input file is required for a non-link phase when an outputfile is specified", caused by CMake injecting the MSVC depfile flag `-MT <object>` into the nvcc command line. The host CUDA library (cuda_engine.cpp) compiles and links. This is a toolchain integration limitation, not a defect in the engine or kernel.
+- The documented CUDA build works. The root cause of an earlier builder failure was that the global strict MSVC `/W4 /WX /permissive-` options were passed bare to nvcc, which interpreted the slash-style `/W4` as a second input file ("single input file required"). These are now scoped to C++ compilation only, and the CUDA target passes them to the host compiler via `-Xcompiler`; the kernel and host CUDA library build and link under a standard CMake+Ninja configuration with CUDA 12.9/nvcc. The integrated CUDA worker-death proof, the real CUDA graph replay + CPU parity test, and the exact device-memory baseline reconciliation all pass.
+- AddressSanitizer is not runnable on this host: the MSVC x64 ASan runtime library (`clang_rt.asan_dynamic_runtime_thunk-x86_64.lib`) is not installed (only the x86 runtime is present), and no clang/clang-cl is available. Sanitizer coverage is therefore reported as unavailable, not simulated.
 - All reference workers share one GPU. Same-device process failover is reported; GPU/node redundancy is not claimed.
 - The reference coordinator is single-coordinator and does not provide partition-safe leadership; fencing is not cryptographic authentication.
 - The deterministic reference workload is not a production LLM server.

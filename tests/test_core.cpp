@@ -187,6 +187,76 @@ int main() {
     catch (const DomainError& e) { CHECK(e.code() == ErrorCode::GenerationExhausted, "generation exhaustion throws"); }
   }
 
+
+  // 13. Coordinator restart -> conservative revalidation, then survivor re-authorization.
+  {
+    EngineResidency rt5 = make_runtime();
+    ReadinessProfileId p5; ReadinessProfile pf5;
+    er_test::seed_engine(rt5, p5, pf5);
+    EngineIncarnationId inc = er_test::register_worker(rt5, 1, 1);
+    er_test::publish_reference_evidence(rt5, inc, rt5.current_epoch());
+    ReadinessResult rb = rt5.evaluate_readiness(inc, p5);
+    CHECK_EQ((int)rb.outcome, (int)ReadinessOutcome::READY, "pre-restart ready");
+    // Coordinator restart advances the epoch durably.
+    CoordinatorEpoch e2 = rt5.advance_epoch();
+    CHECK(e2.raw() > 1, "epoch advanced");
+    // A recovered READY must not survive: readiness becomes conservative.
+    ReadinessResult ra = rt5.evaluate_readiness(inc, p5);
+    CHECK((int)ra.outcome == (int)ReadinessOutcome::REVALIDATION_REQUIRED, "post-restart readiness revalidation-required");
+    // The survivor revalidates its current physical bindings, then re-authorizes.
+    rt5.mark_running(inc);
+    er_test::publish_reference_evidence(rt5, inc, rt5.current_epoch());
+    rt5.revalidate(inc);
+    ReadinessResult rr = rt5.evaluate_readiness(inc, p5);
+    // Revalidation under current authority restores deterministic READY (fresh snapshot,
+    // not a bare persisted flag).
+    CHECK((int)rr.outcome == (int)ReadinessOutcome::READY, "survivor revalidation restores readiness under current authority");
+  }
+
+  // 14. Make-before-break replacement: candidate prepares separately; cutover fences old admission.
+  {
+    EngineResidency rt6 = make_runtime();
+    ReadinessProfileId p6; ReadinessProfile pf6;
+    er_test::seed_engine(rt6, p6, pf6);
+    EngineIncarnationId oldi = er_test::register_worker(rt6, 1, 1);
+    er_test::publish_reference_evidence(rt6, oldi, rt6.current_epoch());
+    rt6.mark_running(oldi);
+    EngineIncarnationId cand = er_test::register_worker(rt6, 2, 2);
+    er_test::publish_reference_evidence(rt6, cand, rt6.current_epoch());
+    rt6.mark_running(cand);
+    ReplacementPlan plan; plan.engine_id = EngineId(1); plan.engine_generation = EngineGeneration(1);
+    plan.old_incarnation = oldi; plan.old_incarnation_generation = EngineIncarnationGeneration(1);
+    plan.candidate_incarnation = cand; plan.candidate_incarnation_generation = EngineIncarnationGeneration(1);
+    plan.epoch = rt6.current_epoch(); plan.authority = rt6.current_authority();
+    plan.overlap_bytes = 1u << 20;
+    ReplacementPlan started = rt6.begin_replacement(plan);
+    CHECK_EQ((int)started.phase, (int)ReplacementPlan::Phase::PREPARING, "replacement preparing");
+    ReplacementPlan cut = rt6.commit_cutover(started.replacement_id);
+    CHECK_EQ((int)cut.phase, (int)ReplacementPlan::Phase::CUTOVER, "authorized cutover committed");
+    // After cutover, new admission to the old authority is fenced (old no longer current).
+    bool old_fenced = false;
+    for (const auto& it : rt6.incarnations()) if (it.incarnation_id == oldi && !it.is_current) old_fenced = true;
+    CHECK(old_fenced, "old incarnation fenced at cutover");
+    ReplacementPlan retired = rt6.retire_old(started.replacement_id);
+    CHECK_EQ((int)retired.phase, (int)ReplacementPlan::Phase::COMPLETE, "old retired; replacement complete");
+  }
+
+  // 15. A stale graph generation blocks a graph-required profile.
+  {
+    EngineResidency rt7 = make_runtime();
+    ReadinessProfileId p7; ReadinessProfile pf7;
+    er_test::seed_engine(rt7, p7, pf7);
+    EngineIncarnationId inc = er_test::register_worker(rt7, 1, 1);
+    er_test::publish_reference_evidence(rt7, inc, rt7.current_epoch());
+    ComponentEvidence ev; ev.incarnation_id = inc; ev.engine_id = EngineId(1); ev.engine_generation = EngineGeneration(1);
+    ev.category = ComponentCategory::GRAPH; ev.state = ComponentState::VERIFIED; ev.subject = "er-reference-graph";
+    ev.graph_generation = GraphGeneration(999); ev.provenance = Provenance::MEASURED;
+    ev.coordinator_epoch = rt7.current_epoch();
+    rt7.publish_component(ev);
+    ReadinessResult r = rt7.evaluate_readiness(inc, p7);
+    CHECK_EQ((int)r.outcome, (int)ReadinessOutcome::BLOCKED, "stale graph generation blocks graph-required profile");
+  }
+
   std::printf("core tests failures=%d\n", er_test::g_failures);
   return er_test::return_code();
 }

@@ -27,7 +27,7 @@ static bool recv_msg(net::TcpSocket& s, ProtocolMessage& out){ return s.recv_fra
 int main() {
   const std::uint16_t port = 27312;
   if (!net::init()) { return 1; }
-  if (!er_spawn_process("er_coordinator.exe", std::to_string(port))) { std::printf("cannot spawn coordinator\n"); return 1; }
+  if (!er_spawn_process(ER_COORDINATOR_LOCATION, std::to_string(port))) { std::printf("cannot spawn coordinator\n"); return 1; }
   net::TcpSocket sock; bool connected=false;
   for (int i=0;i<80;++i){ if (sock.connect("127.0.0.1",port)){ connected=true; break;} std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
   if(!connected){ er_kill_process(); std::printf("coordinator not reachable\n"); return 1; }

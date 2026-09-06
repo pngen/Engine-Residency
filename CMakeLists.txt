@@ -26,7 +26,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
   # Strict first-party warnings, treated as errors. Do NOT globally suppress.
-  add_compile_options(/W4 /WX /permissive-)
+  # These slash-style flags are applied to C++ only. Passed bare to nvcc they
+  # would be read as a second input file ("single input file required"), so CUDA
+  # compilation receives them via -Xcompiler on the er_cuda target below.
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> $<$<COMPILE_LANGUAGE:CXX>:/WX> $<$<COMPILE_LANGUAGE:CXX>:/permissive->)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS=1)
   add_compile_definitions(NOMINMAX=1)
 endif()
@@ -110,6 +113,11 @@ if(ER_BUILD_CUDA)
   set_target_properties(er_cuda PROPERTIES
     CUDA_ARCHITECTURES 120
     CUDA_STANDARD 17)
+  # Strict first-party warnings for CUDA host code, via -Xcompiler.
+  target_compile_options(er_cuda PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/W4>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/WX>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/permissive->)
 endif()
 
 # ---------------------------------------------------------------------------

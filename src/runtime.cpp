@@ -176,6 +176,27 @@ EngineIncarnation EngineResidency::register_incarnation(EngineIncarnation inc, R
   return stored;
 }
 
+void EngineResidency::mark_running(EngineIncarnationId inc_id) {
+  std::unique_lock lk(impl_->mtx);
+  EngineIncarnation* inc = impl_->find_inc(inc_id);
+  if (inc == nullptr) throw_error(ErrorCode::UnknownIncarnation, "unknown incarnation");
+  inc->state.lifecycle = ProcessLifecycle::RUNNING;
+  inc->state.health = HealthState::HEALTHY;
+  inc->last_activity_ns = impl_->clock.now_ns();
+}
+
+void EngineResidency::revalidate(EngineIncarnationId inc_id) {
+  std::unique_lock lk(impl_->mtx);
+  EngineIncarnation* inc = impl_->find_inc(inc_id);
+  if (inc == nullptr) throw_error(ErrorCode::UnknownIncarnation, "unknown incarnation");
+  inc->state.recovery = RecoveryState::NOMINAL;
+  inc->state.preparation = PreparationState::PREPARED;
+  inc->is_current = true;
+  inc->state.lifecycle = ProcessLifecycle::RUNNING;
+  impl_->current_by_engine[inc->engine_id] = inc->incarnation_id;
+  inc->readiness_generation = inc->readiness_generation.next();
+}
+
 void EngineResidency::fence_worker(WorkerId w, WorkerBootId b, const std::string& /*reason*/) {
   std::unique_lock lk(impl_->mtx);
   impl_->fenced[w].insert(b);
@@ -569,7 +590,9 @@ ReplacementPlan EngineResidency::begin_replacement(const ReplacementPlan& plan) 
   if (plan.epoch != impl_->authority.epoch) throw_error(ErrorCode::StaleEpoch, "replacement epoch stale");
   if (plan.authority != impl_->authority.authority) throw_error(ErrorCode::StaleAuthority, "replacement authority stale");
   EngineIncarnation* cand = impl_->find_inc(plan.candidate_incarnation);
-  if (cand == nullptr || !cand->is_current) throw_error(ErrorCode::StaleIncarnation, "candidate not current");
+  // Make-before-break: the candidate may be a warm non-current incarnation that
+  // is RUNNING and READY; it does not need to hold current serving authority yet.
+  if (cand == nullptr || cand->state.lifecycle != ProcessLifecycle::RUNNING) throw_error(ErrorCode::StaleIncarnation, "candidate not running");
   EngineIncarnation* oldi = impl_->find_inc(plan.old_incarnation);
   if (oldi == nullptr) throw_error(ErrorCode::UnknownIncarnation, "old incarnation unknown");
   if (cand->incarnation_id == oldi->incarnation_id) throw_error(ErrorCode::InvalidArgument, "candidate and old identical");
@@ -589,7 +612,7 @@ ReplacementPlan EngineResidency::commit_cutover(ReplacementId rid) {
   ReplacementPlan& p = it->second;
   if (p.phase != ReplacementPlan::Phase::PREPARING) throw_error(ErrorCode::InvalidState, "not in preparing phase");
   EngineIncarnation* cand = impl_->find_inc(p.candidate_incarnation);
-  if (cand == nullptr || !cand->is_current) throw_error(ErrorCode::StaleIncarnation, "candidate not current");
+  if (cand == nullptr || cand->state.lifecycle != ProcessLifecycle::RUNNING) throw_error(ErrorCode::StaleIncarnation, "candidate not running");
   EngineIncarnation* oldi = impl_->find_inc(p.old_incarnation);
   // Make-before-break: old retains authority until cutover; fence its admission now.
   if (oldi != nullptr) {
