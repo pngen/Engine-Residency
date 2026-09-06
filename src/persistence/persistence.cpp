@@ -162,7 +162,7 @@ void w_engine(Writer& w, const EngineDefinition& e) {
   w_id(w,e.device_id); w_id(w,e.device_generation); w.u32(e.device_ordinal); w.u8(e.device_specific?1:0);
   w.u64(e.workspace_bytes); w.u64(e.kv_capacity_entries);
   w.str(e.kernel_key); w_id(w,e.kernel_generation); w.u8(e.kernel_required?1:0);
-  w.u8(e.graph_required?1:0); w.u8(e.graph_optional_fallback?1:0);
+  w.u8(e.graph_required?1:0); w.u8(e.graph_optional_fallback?1:0); w_id(w,e.graph_generation);
   w.str(e.tokenizer_key); w_id(w,e.tokenizer_generation); w.u8(e.tokenizer_required?1:0);
   w_comp(w,e.compatibility); w.u8(e.compatibility_required?1:0);
   w.str(e.preparation_policy); w.u8(e.warmup_required?1:0);
@@ -183,7 +183,7 @@ bool r_engine(Reader& r, EngineDefinition& e) {
   if (!r_id(r,e.device_id)) return false; if (!r_id(r,e.device_generation)) return false; if (!r.u32(e.device_ordinal)) return false; if(!r.u8(b)) return false; e.device_specific=b!=0;
   if (!r.u64(e.workspace_bytes)) return false; if (!r.u64(e.kv_capacity_entries)) return false;
   R_STR(r, e.kernel_key); if (!r_id(r,e.kernel_generation)) return false; if(!r.u8(b)) return false; e.kernel_required=b!=0;
-  if(!r.u8(b)) return false; e.graph_required=b!=0; if(!r.u8(b)) return false; e.graph_optional_fallback=b!=0;
+  if(!r.u8(b)) return false; e.graph_required=b!=0; if(!r.u8(b)) return false; e.graph_optional_fallback=b!=0; if (!r_id(r,e.graph_generation)) return false;
   R_STR(r, e.tokenizer_key); if (!r_id(r,e.tokenizer_generation)) return false; if(!r.u8(b)) return false; e.tokenizer_required=b!=0;
   if (!r_comp(r,e.compatibility)) return false; if(!r.u8(b)) return false; e.compatibility_required=b!=0;
   R_STR(r, e.preparation_policy); if(!r.u8(b)) return false; e.warmup_required=b!=0;

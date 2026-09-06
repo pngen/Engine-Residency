@@ -466,7 +466,9 @@ ActivationRecord EngineResidency::activate(const ActivationRequest& req) {
                            holder->state.health == HealthState::LOST ||
                            holder->state.lifecycle == ProcessLifecycle::LOST ||
                            holder->state.lifecycle == ProcessLifecycle::RETIRED ||
-                           holder->state.lifecycle == ProcessLifecycle::FAILED;
+                           holder->state.lifecycle == ProcessLifecycle::FAILED ||
+                           holder->state.recovery == RecoveryState::REVALIDATING ||
+                           holder->state.recovery == RecoveryState::AWAITING_AUTHORITY;
         if (!holder_dead) throw_error(ErrorCode::ActivationConflict, "exclusive slot already assigned");
       }
       sit->second.assigned_incarnation = inc->incarnation_id;

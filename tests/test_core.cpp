@@ -257,6 +257,29 @@ int main() {
     CHECK_EQ((int)r.outcome, (int)ReadinessOutcome::BLOCKED, "stale graph generation blocks graph-required profile");
   }
 
+
+  // 16. Regression: engine graph_generation survives persistence; a recovered
+  // profile's graph requirement resolves instead of being marked incompatible.
+  {
+    EngineResidency rt8 = make_runtime();
+    ReadinessProfileId p8; ReadinessProfile pf8;
+    er_test::seed_engine(rt8, p8, pf8);
+    EngineIncarnationId inc8 = er_test::register_worker(rt8, 1, 1);
+    er_test::publish_reference_evidence(rt8, inc8, rt8.current_epoch());
+    ReadinessResult rb8 = rt8.evaluate_readiness(inc8, p8);
+    CHECK_EQ((int)rb8.outcome, (int)ReadinessOutcome::READY, "pre-recovery graph-required ready");
+    std::string blob8 = rt8.serialize();
+    EngineResidency rt9 = make_runtime();
+    rt9.load(blob8);
+    rt9.advance_epoch();
+    EngineIncarnationId inc9 = er_test::register_worker(rt9, 3, 9);
+    er_test::publish_reference_evidence(rt9, inc9, rt9.current_epoch());
+    ReadinessResult rr9 = rt9.evaluate_readiness(inc9, p8);
+    // The recovered engine must have preserved its graph generation so the VALID
+    // graph evidence is not falsely flagged incompatible.
+    CHECK((int)rr9.outcome == (int)ReadinessOutcome::READY, "recovered graph-required readiness resolves (graph generation preserved)");
+  }
+
   std::printf("core tests failures=%d\n", er_test::g_failures);
   return er_test::return_code();
 }

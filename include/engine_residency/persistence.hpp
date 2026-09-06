@@ -16,7 +16,7 @@
 namespace engine_residency {
 
 inline constexpr std::uint32_t kPersistenceMagic = 0x45524553;  // "ERES"
-inline constexpr std::uint32_t kPersistenceVersion = 1;
+inline constexpr std::uint32_t kPersistenceVersion = 2;
 inline constexpr std::uint32_t kMaxSerializedBytes = 256u * 1024u * 1024u;  // 256 MiB cap
 
 struct PersistentState {

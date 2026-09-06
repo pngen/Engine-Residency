@@ -87,7 +87,7 @@ static void run_restart_proof() {
     std::printf("restart: old-epoch traffic rejected=%d\n", m.type == MessageType::ERROR ? 1 : 0);
     REQUIRE(m.type == MessageType::ERROR, "restart: old-epoch traffic rejected"); }
   // Fresh worker revalidation under the new epoch + authorized CUDA execution with parity.
-  er_spawn(ER_WORKER_LOCATION, ("--cuda " + pp + " --worker-id 3 --boot 9 --label A2 --pid 400 --serve 1 --result cr_restart_a2.txt --stay-alive").c_str(), wa2);
+  er_spawn(ER_WORKER_LOCATION, ("--cuda " + pp + " --worker-id 3 --boot 9 --label A2 --pid 400 --serve 1 --slot 7 --result cr_restart_a2.txt --stay-alive").c_str(), wa2);
   bool a2_ok = file_contains("cr_restart_a2.txt", "activation=ACTIVE", 30000) && file_contains("cr_restart_a2.txt", "parity=OK", 30000);
   REQUIRE(a2_ok, "restart: fresh revalidation + authorized CUDA execution with parity");
   er_kill(wa2); er_kill(wa); er_kill(cp2);

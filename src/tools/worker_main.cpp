@@ -103,6 +103,7 @@ int main(int argc, char** argv) {
     send_msg(sock,MessageType::ACTIVATE,epoch,auth,{{"readiness_gen","0"},{"slot_id",std::to_string(slot)},{"caller","worker"}});
     recv_msg(sock,epoch,mr);
     activation = get(parse_payload(mr.payload),"state","REJECTED");
+    if (mr.type == MessageType::ERROR) { activation = std::string("REJECTED:") + get(parse_payload(mr.payload),"msg","?"); }
     std::printf("worker %llu activation=%s\n",(unsigned long long)worker_id,activation.c_str());
   }
 
