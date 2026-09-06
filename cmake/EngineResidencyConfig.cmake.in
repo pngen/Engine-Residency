@@ -1,0 +1,6 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/EngineResidencyTargets.cmake")
+
+# EngineResidency::EngineResidency is the backend-neutral core.
+check_required_components(EngineResidency)

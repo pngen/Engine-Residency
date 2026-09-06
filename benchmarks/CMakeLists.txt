@@ -1,0 +1,2 @@
+add_executable(er_bench_core benchmark_core.cpp)
+target_link_libraries(er_bench_core PRIVATE er_core)
