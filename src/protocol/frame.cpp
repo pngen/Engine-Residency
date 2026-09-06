@@ -47,7 +47,7 @@ bool decode_frame(const char* data, std::size_t len, ProtocolMessage& out,
   }
   if ((std::uint8_t)data[4] != kProtoVersion) { error = "unsupported version"; return false; }
   std::uint8_t mt = (std::uint8_t)data[5];
-  if (mt < 1 || mt > 25) { error = "invalid message type"; return false; }
+  if (mt < 1 || mt > 27) { error = "invalid message type"; return false; }
   std::uint32_t epoch = get_u32(data + 6);
   std::uint32_t authority = get_u32(data + 10);
   std::uint32_t plen = get_u32(data + 14);

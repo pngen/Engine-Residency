@@ -58,6 +58,8 @@ enum class MessageType : std::uint8_t {
   SHUTDOWN = 23,
   ERROR = 24,
   EXECUTE = 25,
+  COMMAND_READY = 26,
+  QUERY_DRAIN = 27,
 };
 
 inline const char* to_string(MessageType t) noexcept {
@@ -87,6 +89,8 @@ inline const char* to_string(MessageType t) noexcept {
     case MessageType::SHUTDOWN: return "SHUTDOWN";
     case MessageType::ERROR: return "ERROR";
     case MessageType::EXECUTE: return "EXECUTE";
+    case MessageType::COMMAND_READY: return "COMMAND_READY";
+    case MessageType::QUERY_DRAIN: return "QUERY_DRAIN";
   }
   return "UNKNOWN";
 }

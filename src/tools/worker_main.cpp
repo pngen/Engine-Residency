@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -25,10 +26,17 @@ static bool send_msg(net::TcpSocket& s, MessageType t, std::uint64_t epoch, std:
 }
 static bool recv_msg(net::TcpSocket& s, uint64_t& epoch, ProtocolMessage& out){ if(!s.recv_frame(out)) return false; epoch=out.epoch; return true; }
 
+static void write_marker(const std::string& path, const std::string& text) {
+  FILE* fp = fopen(path.c_str(), "wb");
+  if (fp) { fprintf(fp, "%s", text.c_str()); fclose(fp); }
+}
+static bool file_exists(const std::string& path) { std::ifstream in(path); return in.good(); }
+
 int main(int argc, char** argv) {
   std::string host="127.0.0.1"; std::uint16_t port=27200;
   std::uint64_t worker_id=1, boot=1; std::string label="worker"; std::uint32_t pid=0;
   bool use_cuda=false; int serve=0; std::string result_file; bool stay_alive=false; std::uint64_t slot=1;
+  bool command_mode=false; bool no_activate=false; std::string ready_marker;
   for (int i=1;i<argc;++i){ std::string a=argv[i];
     if(a=="--host") host=argv[++i];
     else if(a=="--port") port=(std::uint16_t)std::atoi(argv[++i]);
@@ -41,6 +49,9 @@ int main(int argc, char** argv) {
     else if(a=="--result") result_file=argv[++i];
     else if(a=="--stay-alive") stay_alive=true;
     else if(a=="--slot") slot=std::stoull(argv[++i]);
+    else if(a=="--command") command_mode=true;
+    else if(a=="--no-activate") no_activate=true;
+    else if(a=="--ready-marker") ready_marker=argv[++i];
   }
   if(!net::init()) return 1;
   net::TcpSocket sock;
@@ -54,8 +65,8 @@ int main(int argc, char** argv) {
   if(mr.type==MessageType::ERROR){ std::printf("worker register rejected: %s\n", get(parse_payload(mr.payload),"msg","").c_str()); return 1; }
   auto reg=parse_payload(mr.payload);
   std::uint64_t inc_id=u(reg,"incarnation_id",0);
+  std::uint64_t rgen=u(reg,"readiness_gen",1);
 
-  // Backend
   std::unique_ptr<ReferenceBackend> backend;
 #ifdef ER_HAS_CUDA
   backend = use_cuda ? make_cuda_reference_backend() : make_cpu_reference_backend();
@@ -63,7 +74,6 @@ int main(int argc, char** argv) {
   backend = make_cpu_reference_backend();
 #endif
   BackendDiscovery disc = backend->discover(0);
-  // Publish backend/device/model/kv/kernel/graph/warmup evidence via coordinator.
   auto pub=[&](int cat,int st,const std::string& subj,const std::string& detail,const std::map<std::string,std::string>& extra){
     std::map<std::string,std::string> f={{"category",std::to_string(cat)},{"state",std::to_string(st)},{"subject",subj},{"detail",detail},{"incarnation_id",std::to_string(inc_id)}};
     for(auto& kv:extra) f[kv.first]=kv.second;
@@ -77,11 +87,9 @@ int main(int argc, char** argv) {
   pub((int)ComponentCategory::KERNEL,(int)ComponentState::VERIFIED,"er-reference-kernel","kernel bound and verified",{{"kernel_gen","1"},{"compat","ref/v1"},{"provenance",std::to_string((int)Provenance::MEASURED)}});
   pub((int)ComponentCategory::GRAPH,(int)ComponentState::VERIFIED,"er-reference-graph","graph instantiated and replayed",{{"graph_gen","1"},{"provenance",std::to_string((int)Provenance::MEASURED)}});
 
-  // Prepare through coordinator.
   send_msg(sock,MessageType::PREPARE,epoch,auth,{});
   recv_msg(sock,epoch,mr);
 
-  // Warmup via real backend compute.
   backend->prepare(1u<<20,1u<<16,1024);
   backend->bind_kernel("er-reference-kernel");
   backend->instantiate_graph(true);
@@ -89,53 +97,109 @@ int main(int argc, char** argv) {
   std::uint64_t warm_elapsed = warm.elapsed_ns;
   pub((int)ComponentCategory::WARMUP,(int)ComponentState::VERIFIED,"warmup","warmup verified",{{"elapsed_ns",std::to_string(warm_elapsed)},{"provenance",std::to_string((int)Provenance::MEASURED)}});
 
-  // Query readiness.
   send_msg(sock,MessageType::QUERY_READINESS,epoch,auth,{});
   recv_msg(sock,epoch,mr);
   std::string outcome = get(parse_payload(mr.payload),"outcome","UNKNOWN");
   std::string qp = mr.payload;
   std::printf("worker %llu readiness=%s\n",(unsigned long long)worker_id,outcome.c_str());
 
-  // Authorize local activation (the worker requests its incarnation's activation
-  // through the coordinator authority). This proves real activation over TCP.
   std::string activation = "UNKNOWN";
-  if (outcome == "READY" || outcome == "DEGRADED") {
-    send_msg(sock,MessageType::ACTIVATE,epoch,auth,{{"readiness_gen","0"},{"slot_id",std::to_string(slot)},{"caller","worker"}});
+  if ((outcome == "READY" || outcome == "DEGRADED") && !no_activate) {
+    send_msg(sock,MessageType::ACTIVATE,epoch,auth,{{"readiness_gen",std::to_string(rgen)},{"slot_id",std::to_string(slot)},{"caller","worker"}});
     recv_msg(sock,epoch,mr);
     activation = get(parse_payload(mr.payload),"state","REJECTED");
     if (mr.type == MessageType::ERROR) { activation = std::string("REJECTED:") + get(parse_payload(mr.payload),"msg","?"); }
     std::printf("worker %llu activation=%s\n",(unsigned long long)worker_id,activation.c_str());
   }
 
-  // Serve: acquire use, execute real compute, verify parity, release.
+  if (command_mode) {
+    send_msg(sock,MessageType::COMMAND_READY,epoch,auth,{});
+    recv_msg(sock,epoch,mr);
+    if (mr.type == MessageType::ERROR) { std::printf("worker command-ready rejected\n"); return 1; }
+    std::printf("worker %llu command-ready\n",(unsigned long long)worker_id);
+    if (!ready_marker.empty()) write_marker(ready_marker, ("worker=" + std::to_string(worker_id) + " incarnation=" + std::to_string(inc_id) + " activation=" + activation).c_str());
+    bool drained = false;
+    std::string last_parity = "NA";
+    while (true) {
+      ProtocolMessage m;
+      if (!recv_msg(sock,epoch,m)) break;
+      auto pf = parse_payload(m.payload);
+      if (m.type == MessageType::EXECUTE) {
+        std::uint64_t cmd_id = u(pf,"cmd_id",0);
+        std::uint64_t seed = u(pf,"seed",42);
+        std::uint32_t batch = (std::uint32_t)u(pf,"batch",1);
+        std::uint32_t seq_len = (std::uint32_t)u(pf,"seq_len",16);
+        std::uint64_t hold_iters = u(pf,"hold_iters",0);
+        std::string hold_barrier = get(pf,"hold_barrier","");
+        std::string marker = get(pf,"marker","");
+        ComputeInput in; in.batch=batch; in.seq_len=seq_len; in.seed=seed;
+        std::uint32_t nel = batch*seq_len;
+        for (std::uint32_t j=0;j<nel;++j) in.input.push_back((float)((int)((j + (int)(seed % 11)) % 11)));
+        std::vector<float> cpu_vec = cpu_reference_compute(in);
+        ComputeResult cpu; cpu.ok=true; cpu.output=std::move(cpu_vec); cpu.seed=seed;
+        if (!marker.empty()) write_marker(marker + ".executing", ("incarnation=" + std::to_string(inc_id)).c_str());
+        ComputeResult result = backend->execute(in);
+        bool parity = backend->verify_parity(result, cpu);
+        last_parity = parity ? "OK" : "MISMATCH";
+        for (std::uint64_t h=0; h<hold_iters; ++h) {
+          ComputeResult r2 = backend->execute(in);
+          bool p2 = backend->verify_parity(r2, cpu);
+          if (!p2) parity = false;
+        }
+        if (!hold_barrier.empty()) {
+          for (int w=0; w<600 && !file_exists(hold_barrier); ++w) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+          std::remove(hold_barrier.c_str());
+        }
+        send_msg(sock,MessageType::EXECUTION_RESULT,epoch,auth,{{"cmd_id",std::to_string(cmd_id)},{"ok",parity?"1":"0"},{"parity",parity?"ok":"mismatch"},{"detail",result.detail},{"seed",std::to_string(seed)}});
+        std::printf("worker %llu execute cmd=%llu parity=%s\n",(unsigned long long)worker_id,(unsigned long long)cmd_id,parity?"OK":"MISMATCH");
+        fflush(stdout);
+      } else if (m.type == MessageType::DRAIN) {
+        std::uint64_t cmd_id = u(pf,"cmd_id",0);
+        backend->release();
+        if (!get(pf,"marker","").empty()) write_marker(get(pf,"marker",""), "cleanup done");
+        send_msg(sock,MessageType::DRAIN_RESULT,epoch,auth,{{"cmd_id",std::to_string(cmd_id)},{"ok","1"},{"detail","backend cleanup complete"}});
+        std::printf("worker %llu drained (backend cleanup)\n",(unsigned long long)worker_id);
+        fflush(stdout);
+        drained = true;
+        break;
+      } else if (m.type == MessageType::SHUTDOWN) {
+        break;
+      } else {
+        send_msg(sock,MessageType::ERROR,epoch,auth,{{"msg","unhandled command"}});
+      }
+    }
+    if (!drained) backend->release();
+    if (!result_file.empty()) {
+      FILE* fp = fopen(result_file.c_str(), "wb");
+      if (fp) { fprintf(fp, "worker=%llu incarnation=%llu readiness=%s activation=%s command=1 parity=%s drained=%d\n", (unsigned long long)worker_id, (unsigned long long)inc_id, outcome.c_str(), activation.c_str(), last_parity.c_str(), drained?1:0); fclose(fp); }
+    }
+    net::shutdown();
+    return 0;
+  }
+
   int served=0;
   for(int i=0;i<serve;++i){
     ComputeInput in; in.batch=1; in.seq_len=16; in.seed=(std::uint64_t)(1000+worker_id*7+i);
     for(int j=0;j<16;++j) in.input.push_back((float)((j+i)%11));
-    std::vector<float> cpu_vec = cpu_reference_compute(in); // CPU parity
+    std::vector<float> cpu_vec = cpu_reference_compute(in);
     ComputeResult cpu; cpu.ok = true; cpu.output = std::move(cpu_vec); cpu.seed = in.seed;
     send_msg(sock,MessageType::ACQUIRE_USE,epoch,auth,{{"execution_id","1"},{"workload_id",std::to_string(worker_id)},{"caller","worker"}});
     recv_msg(sock,epoch,mr); auto ur=parse_payload(mr.payload); std::uint64_t use_id=u(ur,"use_id",0);
     ComputeResult result = backend->execute(in);
     bool parity = backend->verify_parity(result, cpu);
     send_msg(sock,MessageType::EXECUTION_RESULT,epoch,auth,{{"use_id",std::to_string(use_id)},{"ok",parity?"1":"0"},{"parity",parity?"ok":"mismatch"},{"detail",result.detail}});
-    // Release use.
     send_msg(sock,MessageType::RELEASE_USE,epoch,auth,{{"use_id",std::to_string(use_id)}});
     recv_msg(sock,epoch,mr);
     std::printf("worker %llu served req %d parity=%s\n",(unsigned long long)worker_id,i,parity?"OK":"MISMATCH");
     ++served;
   }
 
-  // Write a machine-readable result file when requested (used by the proof tests
-  // to observe readiness + parity across real CUDA worker processes).
   if (!result_file.empty()) {
     FILE* fp = fopen(result_file.c_str(), "wb");
     if (fp) { fprintf(fp, "worker=%llu incarnation=%llu readiness=%s activation=%s parity=%s detail=|%s|\n", (unsigned long long)worker_id, (unsigned long long)inc_id, outcome.c_str(), activation.c_str(), served > 0 ? "OK" : "NA", qp.c_str()); fclose(fp); }
   }
 
   if (stay_alive) {
-    // Hold the device allocations and graph until a real OS termination. This
-    // is the worker process holding genuine CUDA state that a caller kills.
     std::printf("worker %llu staying alive holding CUDA state\n", (unsigned long long)worker_id);
     fflush(stdout);
     while (true) { std::this_thread::sleep_for(std::chrono::milliseconds(200)); }
