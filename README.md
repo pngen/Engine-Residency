@@ -113,7 +113,7 @@ Run the examples for cold-to-warm preparation, profile-specific readiness, servi
 
 ## Benchmarks
 
-Timing covers component publication, readiness evaluation, serving-use acquire/release, invalidation, preparation planning, standby reconciliation, activation, drain bookkeeping, replacement commit, persistence save/recovery, and protocol encode/decode across 100/1k/10k engine and metadata scales. Enqueue latency is never reported as completed throughput.
+The `er_bench_core` example benchmark instruments the core runtime end-to-end: it defines an engine, registers and starts an incarnation, and measures component-publication throughput over a large deterministic batch of evidence (e.g. 20k publications) so a stable publication rate is reported. It deliberately measures the guarded runtime operation and reports completed operational throughput; enqueue latency is never reported as completed throughput. Everything the runtime enforces is bounded by the explicit `RuntimeOptions` caps (e.g. `max_engines`, `max_incarnations`), so no workload is fabricated beyond the configured capacity.
 
 ## Provenance vocabulary
 
